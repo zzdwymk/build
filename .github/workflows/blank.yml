@@ -19,10 +19,10 @@ env:
   DEPLOY_DIR: "releases"
   # QEMU模拟配置
   QEMU_CPU: "max"
-  QEMU_MEM: "4G"  # 与debos的--memory参数对应
-  # 构建脚本仓库
+  QEMU_MEM: "4G"
+  # 构建脚本仓库及目录（关键：配方文件在该目录下）
   BUILD_SCRIPT_REPO: "https://gitlab.com/kalilinux/build-scripts/kali-vm.git"
-  BUILD_SCRIPT_DIR: "kali-vm"
+  BUILD_SCRIPT_DIR: "kali-vm"  # 配方文件与build.sh同在此目录
 
 jobs:
   build:
@@ -38,30 +38,35 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: 获取Kali VM构建脚本
+      - name: 获取Kali VM构建脚本及配方文件
         run: |
-          if [ ! -f "build.sh" ] && [ ! -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
-            echo "未找到build.sh，从官方仓库克隆..."
+          # 克隆官方仓库（包含build.sh和所有配方文件）
+          if [ ! -d "${BUILD_SCRIPT_DIR}" ]; then
+            echo "克隆构建脚本仓库..."
             git clone $BUILD_SCRIPT_REPO $BUILD_SCRIPT_DIR
+            # 检查仓库内容是否完整
+            echo "克隆后的${BUILD_SCRIPT_DIR}目录内容："
+            ls -la $BUILD_SCRIPT_DIR
           fi
           
-          if [ -f "build.sh" ]; then
-            echo "找到build.sh在当前目录"
-            BUILD_SCRIPT_PATH="./build.sh"
-          elif [ -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
-            echo "找到build.sh在${BUILD_SCRIPT_DIR}目录"
-            BUILD_SCRIPT_PATH="./${BUILD_SCRIPT_DIR}/build.sh"
-          else
-            echo "❌ 未找到build.sh构建脚本"
+          # 验证关键文件是否存在（build.sh和配方文件）
+          if [ ! -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
+            echo "❌ 未找到${BUILD_SCRIPT_DIR}/build.sh"
             exit 1
           fi
           
-          echo "BUILD_SCRIPT_PATH=${BUILD_SCRIPT_PATH}" >> $GITHUB_ENV
-          echo "当前工作目录: $(pwd)"
-          echo "构建脚本路径: ${BUILD_SCRIPT_PATH}"
-          ls -la
+          # 检查是否有配方文件（.yaml格式，构建核心依赖）
+          RECIPE_FILES=$(find $BUILD_SCRIPT_DIR -name "*.yaml" | wc -l)
+          if [ $RECIPE_FILES -eq 0 ]; then
+            echo "❌ ${BUILD_SCRIPT_DIR}目录下未找到配方文件（.yaml）"
+            exit 1
+          fi
+          
+          # 保存构建脚本路径
+          echo "BUILD_SCRIPT_PATH=${BUILD_SCRIPT_DIR}/build.sh" >> $GITHUB_ENV
+          echo "确认构建脚本路径：${{ env.BUILD_SCRIPT_PATH }}"
 
-      - name: 安装主机环境依赖（不含容器组件）
+      - name: 安装主机环境依赖
         run: |
           sudo apt-get update -y
           sudo apt-get upgrade -y
@@ -101,17 +106,20 @@ jobs:
           EOF
           cat ~/.config/debos/config.yaml
 
-      - name: 主机环境直接构建镜像
+      - name: 主机环境直接构建镜像（切换到脚本目录执行）
         run: |
-          echo "当前工作目录: $(pwd)"
+          # 关键修复：切换到包含配方文件的目录（BUILD_SCRIPT_DIR）
+          cd $BUILD_SCRIPT_DIR
+          echo "当前工作目录（已切换）: $(pwd)"
+          echo "当前目录内容（确认配方文件存在）："
           ls -la
           
-          chmod +x $BUILD_SCRIPT_PATH
+          # 赋予脚本执行权限
+          chmod +x build.sh
           ulimit -n 4096
           
-          # 关键修复：移除不支持的--disable-kvm和--no-container参数
-          # 将debos的选项（如--artifactdir）放在--之后传递
-          $BUILD_SCRIPT_PATH \
+          # 在配方文件所在目录执行脚本，确保能找到配方
+          ./build.sh \
             -a $ARCH \
             -b $BRANCH \
             -v $VARIANT \
@@ -121,35 +129,24 @@ jobs:
             -T $TOOLSET \
             -U $USER_PASS \
             -Z $TIMEZONE \
-            -- \  # 分隔符，后面是debos的选项
-            --artifactdir $OUTPUT_DIR \  # debos的产物目录参数
-            --memory $QEMU_MEM  # 传递内存限制给debos
+            -- \
+            --artifactdir ../$OUTPUT_DIR \  # 输出目录在仓库根目录的artifacts
+            --memory $QEMU_MEM
 
-          # 验证构建结果（注意：产物路径可能在BUILD_SCRIPT_DIR下）
-          if [ -d "${BUILD_SCRIPT_DIR}/${OUTPUT_DIR}" ]; then
-            OUTPUT_PATH="${BUILD_SCRIPT_DIR}/${OUTPUT_DIR}"
-          else
-            OUTPUT_PATH="${OUTPUT_DIR}"
-          fi
-          
-          if [ -z "$(ls $OUTPUT_PATH/*.$FORMAT 2>/dev/null)" ]; then
+          # 验证构建结果（输出目录在仓库根目录）
+          cd ..  # 返回根目录
+          if [ -z "$(ls $OUTPUT_DIR/*.$FORMAT 2>/dev/null)" ]; then
             echo "❌ 镜像构建失败，未找到产物文件"
             exit 1
           else
             echo "✅ 镜像构建成功，产物列表："
-            ls -lh $OUTPUT_PATH
+            ls -lh $OUTPUT_DIR
           fi
 
       - name: 压缩镜像产物
         run: |
           mkdir -p $DEPLOY_DIR
-          if [ -d "${BUILD_SCRIPT_DIR}/${OUTPUT_DIR}" ]; then
-            OUTPUT_PATH="${BUILD_SCRIPT_DIR}/${OUTPUT_DIR}"
-          else
-            OUTPUT_PATH="${OUTPUT_DIR}"
-          fi
-          
-          for file in $OUTPUT_PATH/*.$FORMAT; do
+          for file in $OUTPUT_DIR/*.$FORMAT; do
             filename=$(basename "$file")
             7z a -t7z -mmt=4 "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9
             echo "压缩完成：$DEPLOY_DIR/${filename}.7z"
