@@ -36,13 +36,13 @@ jobs:
       # Prepare the environment
       - name: Prepare the environment
         run: |
-          sudo apt update \
-          sudo apt install -y git debos dosfstools p7zip qemu-utils zerofree \
+          sudo apt-get update \
+          sudo apt-get install -y git debos dosfstools p7zip qemu-utils zerofree \
           git clone https://gitlab.com/kalilinux/build-scripts/kali-vm.git \
           cd ./kali-vm
         
       # Build
-      - name: Build
+      - name: Build the Kali VM image
         run: |
           ./build.sh -v vmware -b kali-last-snapshot -D gnome -s 100 -S everything
           
