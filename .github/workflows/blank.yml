@@ -1,4 +1,4 @@
-name: Kali Linux VM 自动构建（无KVM依赖）
+name: Kali Linux VM 自动构建（纯主机环境）
 
 on:
   push:
@@ -12,18 +12,22 @@ env:
   FORMAT: "vmware"
   DESKTOP: "gnome"
   SIZE: "100"  
-  TOOLSET: "default" 
+  TOOLSET: "default"
   USER_PASS: "kali:kali"
   TIMEZONE: "Asia/Shanghai"
   OUTPUT_DIR: "artifacts"
   DEPLOY_DIR: "releases"
+  # 增加QEMU模拟性能的环境变量
+  QEMU_CPU: "max"
+  QEMU_MEM: "4G"
 
 jobs:
   build:
-    name: 构建 Kali VM 镜像
+    name: 纯主机环境构建 Kali VM 镜像
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+    timeout-minutes: 180  # 延长超时时间，软件模拟构建较慢
 
     steps:
       - name: 拉取代码仓库
@@ -31,38 +35,60 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: 安装构建依赖（无KVM版本）
+      - name: 安装主机环境依赖（不含容器组件）
         run: |
+          # 彻底更新系统并安装必要工具，移除所有容器相关包
           sudo apt-get update -y
+          sudo apt-get upgrade -y
+          
+          # 先清理可能存在的冲突包
+          sudo apt-get remove -y containerd.io containerd docker.io docker-engine docker-ce
+          sudo apt-get autoremove -y
+          
+          # 安装必要工具（不含任何容器相关组件）
           sudo apt-get install -y \
             debos \
             dosfstools \
             p7zip-full \
+            qemu-system-x86 \
             qemu-utils \
             zerofree \
             git \
             curl \
             wget \
             unzip \
-            docker.io
-          sudo systemctl start docker
-          sudo usermod -aG docker $USER
-          # 验证QEMU安装
+            parted \
+            kpartx \
+            debootstrap \
+            squashfs-tools \
+            xz-utils \
+            libguestfs-tools
+          
+          # 验证QEMU安装和版本
           qemu-system-x86_64 --version
+          
+          # 确保设备文件权限正确
+          sudo chmod 666 /dev/null /dev/zero /dev/random /dev/urandom
 
-      - name: 配置Debos使用软件模拟（不依赖KVM）
+      - name: 配置Debos强制软件模拟
         run: |
-          # 创建Debos配置文件，强制使用软件模拟
+          # 创建Debos配置文件，优化QEMU参数
           mkdir -p ~/.config/debos
           cat > ~/.config/debos/config.yaml << EOF
           qemu:
-            acceleration: none  # 禁用所有硬件加速
+            acceleration: none
+            cpu: $QEMU_CPU
+            memory: $QEMU_MEM
+            extra-args: "-no-kvm -machine q35,accel=tcg -smp 2"
           EOF
           cat ~/.config/debos/config.yaml
 
-      - name: 构建 Kali VM 镜像（软件模拟）
+      - name: 主机环境直接构建镜像
         run: |
-          # 使用--disable-kvm参数禁用KVM加速
+          # 增加系统文件描述符限制，避免构建过程中出现"too many open files"错误
+          ulimit -n 4096
+          
+          # 直接在主机环境运行构建脚本，禁用所有虚拟化加速
           ./build.sh \
             -a $ARCH \
             -b $BRANCH \
@@ -74,7 +100,8 @@ jobs:
             -U $USER_PASS \
             -Z $TIMEZONE \
             --artifactdir $OUTPUT_DIR \
-            --disable-kvm  # 关键参数：禁用KVM
+            --disable-kvm \
+            --no-container  # 确保不使用任何容器化方式
 
           # 验证构建结果
           if [ -z "$(ls $OUTPUT_DIR/*.$FORMAT 2>/dev/null)" ]; then
@@ -90,7 +117,8 @@ jobs:
           mkdir -p $DEPLOY_DIR
           for file in $OUTPUT_DIR/*.$FORMAT; do
             filename=$(basename "$file")
-            7z a -t7z "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9
+            # 增加压缩线程数加速压缩过程
+            7z a -t7z -mmt=4 "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9
             echo "压缩完成：$DEPLOY_DIR/${filename}.7z"
           done
           cd $DEPLOY_DIR
@@ -108,13 +136,14 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          name: "Kali VM 自动构建 ${{ github.sha }}"
-          tag_name: "auto-build-${{ github.sha }}"
+          name: "Kali VM 纯主机构建 ${{ github.sha }}"
+          tag_name: "native-build-${{ github.sha }}"
           body: |
-            自动构建产物（基于 commit: ${{ github.sha }}）
+            纯主机环境自动构建产物（基于 commit: ${{ github.sha }}）
             - 架构：${{ env.ARCH }}
             - 桌面环境：${{ env.DESKTOP }}
             - 格式：${{ env.FORMAT }}
+            - 构建环境：Ubuntu 22.04 纯主机环境（无容器）
           files: ${{ env.DEPLOY_DIR }}/*
           draft: false
           prerelease: true
