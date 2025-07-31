@@ -7,12 +7,12 @@ on:
 
 env:
   ARCH: "amd64"
-  BRANCH: "kali-last-snapshot"
-  VARIANT: "vmware"
-  FORMAT: "vmware"
-  DESKTOP: "gnome"
-  SIZE: "100"  # 磁盘大小(GB)
-  TOOLSET: "default"
+  BRANCH: "kali-rolling"
+  VARIANT: "generic"  # 与配方文件匹配的变体
+  FORMAT: "raw"
+  DESKTOP: "xfce"
+  SIZE: "15"  # 磁盘大小(GB)
+  TOOLSET: "minimal"
   USER_PASS: "kali:kali"
   TIMEZONE: "Asia/Shanghai"
   OUTPUT_DIR: "artifacts"
@@ -20,9 +20,10 @@ env:
   # QEMU模拟配置
   QEMU_CPU: "max"
   QEMU_MEM: "4G"
-  # 构建脚本仓库及目录（关键：配方文件在该目录下）
+  # 构建脚本仓库及配方文件配置
   BUILD_SCRIPT_REPO: "https://gitlab.com/kalilinux/build-scripts/kali-vm.git"
-  BUILD_SCRIPT_DIR: "kali-vm"  # 配方文件与build.sh同在此目录
+  BUILD_SCRIPT_DIR: "kali-vm"
+  RECIPE_FILE: "image.yaml"  # 显式指定配方文件（根据目录内容选择存在的.yaml文件）
 
 jobs:
   build:
@@ -40,31 +41,28 @@ jobs:
 
       - name: 获取Kali VM构建脚本及配方文件
         run: |
-          # 克隆官方仓库（包含build.sh和所有配方文件）
           if [ ! -d "${BUILD_SCRIPT_DIR}" ]; then
             echo "克隆构建脚本仓库..."
             git clone $BUILD_SCRIPT_REPO $BUILD_SCRIPT_DIR
-            # 检查仓库内容是否完整
-            echo "克隆后的${BUILD_SCRIPT_DIR}目录内容："
-            ls -la $BUILD_SCRIPT_DIR
           fi
           
-          # 验证关键文件是否存在（build.sh和配方文件）
+          # 验证关键文件
           if [ ! -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
             echo "❌ 未找到${BUILD_SCRIPT_DIR}/build.sh"
             exit 1
           fi
           
-          # 检查是否有配方文件（.yaml格式，构建核心依赖）
-          RECIPE_FILES=$(find $BUILD_SCRIPT_DIR -name "*.yaml" | wc -l)
-          if [ $RECIPE_FILES -eq 0 ]; then
-            echo "❌ ${BUILD_SCRIPT_DIR}目录下未找到配方文件（.yaml）"
+          # 验证配方文件存在
+          if [ ! -f "${BUILD_SCRIPT_DIR}/${RECIPE_FILE}" ]; then
+            echo "❌ 未找到配方文件${BUILD_SCRIPT_DIR}/${RECIPE_FILE}"
+            echo "当前目录下的配方文件："
+            find $BUILD_SCRIPT_DIR -name "*.yaml"
             exit 1
           fi
           
-          # 保存构建脚本路径
           echo "BUILD_SCRIPT_PATH=${BUILD_SCRIPT_DIR}/build.sh" >> $GITHUB_ENV
           echo "确认构建脚本路径：${{ env.BUILD_SCRIPT_PATH }}"
+          echo "确认配方文件路径：${BUILD_SCRIPT_DIR}/${RECIPE_FILE}"
 
       - name: 安装主机环境依赖
         run: |
@@ -106,19 +104,18 @@ jobs:
           EOF
           cat ~/.config/debos/config.yaml
 
-      - name: 主机环境直接构建镜像（切换到脚本目录执行）
+      - name: 主机环境直接构建镜像（显式指定配方文件）
         run: |
-          # 关键修复：切换到包含配方文件的目录（BUILD_SCRIPT_DIR）
           cd $BUILD_SCRIPT_DIR
-          echo "当前工作目录（已切换）: $(pwd)"
-          echo "当前目录内容（确认配方文件存在）："
-          ls -la
+          echo "当前工作目录: $(pwd)"
+          echo "配方文件详情："
+          ls -la $RECIPE_FILE
           
-          # 赋予脚本执行权限
           chmod +x build.sh
           ulimit -n 4096
           
-          # 在配方文件所在目录执行脚本，确保能找到配方
+          # 关键修复：通过 -R 参数显式指定配方文件（根据build.sh的逻辑调整参数）
+          # 若-R不生效，尝试直接将配方文件作为参数传递（部分版本支持）
           ./build.sh \
             -a $ARCH \
             -b $BRANCH \
@@ -129,12 +126,13 @@ jobs:
             -T $TOOLSET \
             -U $USER_PASS \
             -Z $TIMEZONE \
+            -R $RECIPE_FILE \  # 显式指定配方文件路径
             -- \
-            --artifactdir ../$OUTPUT_DIR \  # 输出目录在仓库根目录的artifacts
+            --artifactdir ../$OUTPUT_DIR \
             --memory $QEMU_MEM
 
-          # 验证构建结果（输出目录在仓库根目录）
-          cd ..  # 返回根目录
+          # 验证构建结果
+          cd ..
           if [ -z "$(ls $OUTPUT_DIR/*.$FORMAT 2>/dev/null)" ]; then
             echo "❌ 镜像构建失败，未找到产物文件"
             exit 1
