@@ -15,23 +15,29 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装依赖工具（解决容器包冲突）
+      - name: 验证系统自带容器环境
+        run: |
+          # 检查是否已安装 docker 和 containerd
+          echo "Docker 版本："
+          docker --version
+          echo "Containerd 版本："
+          containerd --version
+          # 确保 docker 服务启动
+          sudo systemctl start docker
+          # 将当前用户加入 docker 组（避免权限问题）
+          sudo usermod -aG docker $USER
+          # 刷新用户组权限（无需重新登录）
+          newgrp docker
+
+      - name: 安装其他依赖工具（不含容器相关）
         run: |
           sudo apt-get update
-          # 先卸载系统自带的 containerd，避免与 docker.io 依赖的 containerd.io 冲突
-          sudo apt-get remove -y containerd
-          # 强制安装 docker.io 及其依赖（自动处理 containerd.io）
           sudo apt-get install -y \
             qemu-utils \
-            docker.io \
             kpartx \
             yq \
             parted \
             dosfstools
-          sudo systemctl start docker
-          sudo usermod -aG docker $USER
-          # 验证 Docker 是否正常启动
-          docker --version
 
       - name: 赋予脚本执行权限
         run: |
@@ -40,6 +46,7 @@ jobs:
 
       - name: 容器化构建镜像
         run: |
+          # 利用系统自带的 docker 环境执行构建脚本
           ./build-in-container.sh
 
       - name: 查看构建产物
