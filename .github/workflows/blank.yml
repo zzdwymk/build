@@ -1,153 +1,51 @@
-name: Kali Linux VM 容器化构建
+name: Kali VM Image Build
 
+# 触发条件：推送到主分支或创建 Pull Request 时
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
-
-env:
-  # 构建参数
-  ARCH: "amd64"
-  BRANCH: "kali-rolling"
-  VARIANT: "generic"
-  FORMAT: "raw"
-  DESKTOP: "xfce"
-  SIZE: "20"  # 磁盘大小(GB)
-  TOOLSET: "minimal"
-  USER_PASS: "kali:kali"
-  TIMEZONE: "Asia/Shanghai"
-  # 路径配置
-  OUTPUT_DIR: "${{ github.workspace }}/artifacts"
-  DEPLOY_DIR: "${{ github.workspace }}/releases"
-  BUILD_SCRIPT_DIR: "kali-vm"
-  # 官方构建容器镜像
-  BUILD_IMAGE: "kalilinux/kali-vm-build:latest"
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
-    name: 容器化构建 Kali VM 镜像
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    timeout-minutes: 180
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 构建可能耗时较长，设置超时时间
 
     steps:
-      - name: 拉取代码仓库
+      - name: 检出代码
         uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
 
-      - name: 准备构建目录
+      - name: 安装依赖工具
         run: |
-          # 创建输出目录并设置权限（容器内需要读写权限）
-          mkdir -p $OUTPUT_DIR $DEPLOY_DIR
-          chmod -R 777 $OUTPUT_DIR $DEPLOY_DIR
-          
-          # 克隆官方构建脚本（包含配方文件）
-          if [ ! -d "$BUILD_SCRIPT_DIR" ]; then
-            git clone https://gitlab.com/kalilinux/build-scripts/kali-vm.git $BUILD_SCRIPT_DIR
-          fi
-          
-          # 确认构建脚本和配方文件存在
-          if [ ! -f "$BUILD_SCRIPT_DIR/build.sh" ]; then
-            echo "❌ 未找到构建脚本"
-            exit 1
-          fi
-          
-          if [ -z "$(find $BUILD_SCRIPT_DIR -name '*.yaml')" ]; then
-            echo "❌ 未找到配方文件"
-            exit 1
-          fi
-          
-          # 显示目录结构用于调试
-          ls -la $BUILD_SCRIPT_DIR
-
-      - name: 启动Docker服务并验证
-        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-utils \
+            docker.io \
+            kpartx \
+            yq \
+            parted \
+            dosfstools
           sudo systemctl start docker
-          docker --version
-          # 测试容器运行
-          docker run --rm hello-world
+          sudo usermod -aG docker $USER
 
-      - name: 拉取官方构建容器镜像
+      - name: 赋予脚本执行权限
         run: |
-          docker pull $BUILD_IMAGE
-          # 验证镜像
-          docker images | grep kali-vm-build
+          chmod +x build.sh
+          chmod +x build-in-container.sh
 
-      - name: 使用容器构建Kali VM镜像
+      - name: 容器化构建镜像
         run: |
-          # 通过容器运行构建脚本，映射必要目录
-          docker run --rm \
-            -v "${{ github.workspace }}/$BUILD_SCRIPT_DIR:/workdir" \
-            -v "$OUTPUT_DIR:/artifacts" \
-            -e ARCH=$ARCH \
-            -e BRANCH=$BRANCH \
-            -e VARIANT=$VARIANT \
-            -e FORMAT=$FORMAT \
-            -e DESKTOP=$DESKTOP \
-            -e SIZE=$SIZE \
-            -e TOOLSET=$TOOLSET \
-            -e USER_PASS=$USER_PASS \
-            -e TIMEZONE=$TIMEZONE \
-            $BUILD_IMAGE \
-            /bin/bash -c "cd /workdir && \
-                         chmod +x build.sh && \
-                         ./build.sh \
-                           -a \$ARCH \
-                           -b \$BRANCH \
-                           -v \$VARIANT \
-                           -f \$FORMAT \
-                           -D \$DESKTOP \
-                           -s \$SIZE \
-                           -T \$TOOLSET \
-                           -U \$USER_PASS \
-                           -Z \$TIMEZONE \
-                           -- \
-                           --artifactdir /artifacts \
-                           --memory 4G"
+          # 使用项目提供的容器化构建脚本
+          ./build-in-container.sh
 
-      - name: 验证构建产物
+      - name: 查看构建产物
         run: |
-          echo "构建产物目录内容："
-          ls -lh $OUTPUT_DIR
-          
-          if [ -z "$(ls $OUTPUT_DIR/*.$FORMAT 2>/dev/null)" ]; then
-            echo "❌ 镜像构建失败，未找到产物文件"
-            exit 1
-          else
-            echo "✅ 镜像构建成功"
-          fi
+          ls -lh output/  # 假设输出文件在 output 目录
 
-      - name: 压缩镜像产物
-        run: |
-          for file in $OUTPUT_DIR/*.$FORMAT; do
-            filename=$(basename "$file")
-            7z a -t7z -mmt=4 "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9
-            echo "压缩完成：$DEPLOY_DIR/${filename}.7z"
-          done
-          cd $DEPLOY_DIR
-          sha256sum * > SHA256SUMS
-          cd ..
-
-      - name: 上传产物到 GitHub Artifacts
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: kali-vm-images
-          path: ${{ env.DEPLOY_DIR }}/*
-          retention-days: 7
-
-      - name: 创建 GitHub Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "Kali VM 容器化构建 ${{ github.sha }}"
-          tag_name: "container-build-${{ github.sha }}"
-          body: |
-            容器化自动构建产物（基于 commit: ${{ github.sha }}）
-            - 架构：${{ env.ARCH }}
-            - 桌面环境：${{ env.DESKTOP }}
-            - 格式：${{ env.FORMAT }}
-          files: ${{ env.DEPLOY_DIR }}/*
-          draft: false
-          prerelease: true
+          name: kali-vm-image
+          path: output/*.img  # 上传所有 img 格式的镜像文件
+          retention-days: 7  # 产物保留 7 天
