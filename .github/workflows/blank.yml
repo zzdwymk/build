@@ -11,7 +11,7 @@ env:
   VARIANT: "vmware"
   FORMAT: "vmware"
   DESKTOP: "gnome"
-  SIZE: "100"  
+  SIZE: "100"  # 进一步减小磁盘大小以加快纯软件模拟构建
   TOOLSET: "default"
   USER_PASS: "kali:kali"
   TIMEZONE: "Asia/Shanghai"
@@ -20,6 +20,9 @@ env:
   # 增加QEMU模拟性能的环境变量
   QEMU_CPU: "max"
   QEMU_MEM: "4G"
+  # 构建脚本仓库（根据实际情况修改）
+  BUILD_SCRIPT_REPO: "https://gitlab.com/kalilinux/build-scripts/kali-vm.git"
+  BUILD_SCRIPT_DIR: "kali-vm"
 
 jobs:
   build:
@@ -30,10 +33,38 @@ jobs:
     timeout-minutes: 180  # 延长超时时间，软件模拟构建较慢
 
     steps:
-      - name: 拉取代码仓库
+      - name: 拉取主代码仓库
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+
+      - name: 获取Kali VM构建脚本
+        run: |
+          # 如果当前仓库不包含build.sh，从官方仓库克隆
+          if [ ! -f "build.sh" ] && [ ! -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
+            echo "未找到build.sh，从官方仓库克隆..."
+            git clone $BUILD_SCRIPT_REPO $BUILD_SCRIPT_DIR
+          fi
+          
+          # 验证构建脚本是否存在
+          if [ -f "build.sh" ]; then
+            echo "找到build.sh在当前目录"
+            BUILD_SCRIPT_PATH="./build.sh"
+          elif [ -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
+            echo "找到build.sh在${BUILD_SCRIPT_DIR}目录"
+            BUILD_SCRIPT_PATH="./${BUILD_SCRIPT_DIR}/build.sh"
+            # 进入构建脚本目录
+            cd $BUILD_SCRIPT_DIR
+          else
+            echo "❌ 未找到build.sh构建脚本"
+            exit 1
+          fi
+          
+          # 保存构建脚本路径到环境变量
+          echo "BUILD_SCRIPT_PATH=${BUILD_SCRIPT_PATH}" >> $GITHUB_ENV
+          echo "当前工作目录: $(pwd)"
+          echo "构建脚本路径: ${BUILD_SCRIPT_PATH}"
+          ls -la
 
       - name: 安装主机环境依赖（不含容器组件）
         run: |
@@ -85,11 +116,18 @@ jobs:
 
       - name: 主机环境直接构建镜像
         run: |
+          # 显示工作目录和文件列表，用于调试
+          echo "当前工作目录: $(pwd)"
+          ls -la
+          
+          # 确保构建脚本有执行权限
+          chmod +x $BUILD_SCRIPT_PATH
+          
           # 增加系统文件描述符限制，避免构建过程中出现"too many open files"错误
           ulimit -n 4096
           
           # 直接在主机环境运行构建脚本，禁用所有虚拟化加速
-          ./build.sh \
+          $BUILD_SCRIPT_PATH \
             -a $ARCH \
             -b $BRANCH \
             -v $VARIANT \
@@ -115,7 +153,14 @@ jobs:
       - name: 压缩镜像产物
         run: |
           mkdir -p $DEPLOY_DIR
-          for file in $OUTPUT_DIR/*.$FORMAT; do
+          # 如果构建脚本在子目录，需要调整路径
+          if [ -d "${BUILD_SCRIPT_DIR}/${OUTPUT_DIR}" ]; then
+            OUTPUT_PATH="${BUILD_SCRIPT_DIR}/${OUTPUT_DIR}"
+          else
+            OUTPUT_PATH="${OUTPUT_DIR}"
+          fi
+          
+          for file in $OUTPUT_PATH/*.$FORMAT; do
             filename=$(basename "$file")
             # 增加压缩线程数加速压缩过程
             7z a -t7z -mmt=4 "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9
