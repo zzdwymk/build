@@ -36,10 +36,10 @@ jobs:
       # Prepare the environment
       - name: Prepare the environment
         run: |
-          sudo apt update && sudo apt upgrade -y \
+          sudo apt update \
           sudo apt install -y git debos dosfstools p7zip qemu-utils zerofree \
           git clone https://gitlab.com/kalilinux/build-scripts/kali-vm.git \
-          cd kali-vm
+          cd ./kali-vm
         
       # Build
       - name: Build
