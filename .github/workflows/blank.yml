@@ -1,6 +1,5 @@
 name: Kali VM Image Build
 
-# 触发条件：推送到主分支或创建 Pull Request 时
 on:
   push:
     branches: [ main ]
@@ -10,15 +9,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 构建可能耗时较长，设置超时时间
+    timeout-minutes: 360
 
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装依赖工具
+      - name: 安装依赖工具（解决容器包冲突）
         run: |
           sudo apt-get update
+          # 先卸载系统自带的 containerd，避免与 docker.io 依赖的 containerd.io 冲突
+          sudo apt-get remove -y containerd
+          # 强制安装 docker.io 及其依赖（自动处理 containerd.io）
           sudo apt-get install -y \
             qemu-utils \
             docker.io \
@@ -28,6 +30,8 @@ jobs:
             dosfstools
           sudo systemctl start docker
           sudo usermod -aG docker $USER
+          # 验证 Docker 是否正常启动
+          docker --version
 
       - name: 赋予脚本执行权限
         run: |
@@ -36,16 +40,15 @@ jobs:
 
       - name: 容器化构建镜像
         run: |
-          # 使用项目提供的容器化构建脚本
           ./build-in-container.sh
 
       - name: 查看构建产物
         run: |
-          ls -lh output/  # 假设输出文件在 output 目录
+          ls -lh output/
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: kali-vm-image
-          path: output/*.img  # 上传所有 img 格式的镜像文件
-          retention-days: 7  # 产物保留 7 天
+          path: output/*.img
+          retention-days: 7
