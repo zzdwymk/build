@@ -1,62 +1,128 @@
-name: Kali VM image builder
+# .github/workflows/kali-vm-build.yml
+name: Kali Linux VM 自动构建
 
-# Controls when the workflow will run
+
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:  
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+# 环境变量配置（可根据需求调整）
+env:
+  ARCH: "amd64"                   # 架构：amd64/arm64 等
+  BRANCH: "kali-last-snapshot"          # Kali 分支：kali-rolling/kali-last-snapshot
+  VARIANT: "generic"              # 变体：generic/hyperv/qemu/virtualbox/vmware/rootfs
+  FORMAT: "vmware"                   # 输出格式：hyperv/ova/ovf/qemu/raw/vagrant/virtualbox/vmware
+  DESKTOP: "gnome"                 # 桌面环境：e17/gnome/i3/kde/lxde/mate/xfce/none
+  SIZE: "100"                      # 磁盘大小（GB）
+  TOOLSET: "default"              # 工具集：default/everything/headless/large/none
+  USER_PASS: "kali:kali"          # 默认用户名:密码
+  TIMEZONE: "Asia/Shanghai"       # 时区（建议根据使用场景调整）
+  OUTPUT_DIR: "artifacts"         # 产物输出目录
+  DEPLOY_DIR: "releases"          # 部署目录
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-22.04
+    name: 构建 Kali VM 镜像
+    runs-on: ubuntu-22.04  # 使用 Ubuntu 22.04 作为构建环境（支持 KVM 加速）
     
+    # 配置虚拟机资源（启用嵌套虚拟化加速构建）
     permissions:
-      contents: write
+      contents: write  # 允许上传产物到 Releases
     env:
-      DEBIAN_FRONTEND: noninteractive
+      DEBIAN_FRONTEND: noninteractive  # 避免 apt 交互提示
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - name: Check out
+      - name: 拉取代码仓库
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'  # 拉取子模块（如有依赖）
 
-      # Cleanup The Actions Workspace Using Custom Composite Run Actions
-      - name: Cleanup
-        uses: rokibhasansagar/slimhub_actions@main
+      - name: 启用 KVM 虚拟化加速
+        run: |
+          # 检查并启用 KVM 模块
+          sudo modprobe kvm
+          sudo modprobe kvm_intel  # 如为 AMD 处理器，替换为 kvm_amd
+          # 配置权限
+          sudo chmod 666 /dev/kvm
+          echo "KVM 状态: $(lsmod | grep kvm)"
 
-      # Prepare the environment
-      - name: Prepare the environment
+      - name: 安装构建依赖
         run: |
-          sudo apt-get update \
-          sudo apt-get install -yq \
-          git \
-          debos \
-          dosfstools \
-          p7zip \
-          qemu-utils \
-          zerofree 
+          # 更新系统并安装必要工具
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            debos \
+            dosfstools \
+            p7zip-full \
+            qemu-utils \
+            zerofree \
+            git \
+            curl \
+            wget \
+            unzip \
+            docker.io
+          # 启动 Docker 服务（如需容器化构建）
+          sudo systemctl start docker
+          sudo usermod -aG docker $USER
 
-      # Clone the Project
-      - name: Clone the Project
+      - name: 构建 Kali VM 镜像
         run: |
-          git clone https://gitlab.com/kalilinux/build-scripts/kali-vm.git 
-        
-      # Build
-      - name: Build the Kali VM image
-        run: |
-          cd ./kali-vm
-          ./build.sh -v vmware -b kali-last-snapshot -D gnome -s 100 -S everything
+          # 执行构建脚本（使用项目中的 build.sh）
+          ./build.sh \
+            -a $ARCH \
+            -b $BRANCH \
+            -v $VARIANT \
+            -f $FORMAT \
+            -D $DESKTOP \
+            -s $SIZE \
+            -T $TOOLSET \
+            -U $USER_PASS \
+            -Z $TIMEZONE \
+            --artifactdir $OUTPUT_DIR
           
-      # Display
-      - name: Display
+          # 验证构建结果
+          if [ -z "$(ls $OUTPUT_DIR/*.$FORMAT 2>/dev/null)" ]; then
+            echo "❌ 镜像构建失败，未找到产物文件"
+            exit 1
+          else
+            echo "✅ 镜像构建成功，产物列表："
+            ls -lh $OUTPUT_DIR
+          fi
+
+      - name: 压缩镜像产物
         run: |
-          ls -lh
+          # 创建部署目录
+          mkdir -p $DEPLOY_DIR
+          # 压缩镜像（减少存储空间和下载时间）
+          for file in $OUTPUT_DIR/*.$FORMAT; do
+            filename=$(basename "$file")
+            7z a -t7z "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9  # 最高压缩级别
+            echo "压缩完成：$DEPLOY_DIR/${filename}.7z"
+          done
+          # 生成产物校验值
+          cd $DEPLOY_DIR
+          sha256sum * > SHA256SUMS
+          cd ..
+
+      - name: 上传产物到 GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kali-vm-images
+          path: ${{ env.DEPLOY_DIR }}/*
+          retention-days: 7  # 临时产物保留7天
+
+      - name: 创建 GitHub Release 并上传产物
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Kali VM 自动构建 ${{ github.sha }}"
+          tag_name: "auto-build-${{ github.sha }}"
+          body: |
+            自动构建产物（基于 commit: ${{ github.sha }}）
+            - 架构：${{ env.ARCH }}
+            - 桌面环境：${{ env.DESKTOP }}
+            - 格式：${{ env.FORMAT }}
+          files: ${{ env.DEPLOY_DIR }}/*
+          draft: false
+          prerelease: true
