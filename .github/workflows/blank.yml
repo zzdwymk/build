@@ -1,4 +1,4 @@
-name: Kali Linux VM 自动构建（纯主机环境）
+name: Kali Linux VM 容器化构建
 
 on:
   push:
@@ -6,144 +6,121 @@ on:
   workflow_dispatch:
 
 env:
+  # 构建参数
   ARCH: "amd64"
   BRANCH: "kali-rolling"
-  VARIANT: "generic"  # 与配方文件匹配的变体
+  VARIANT: "generic"
   FORMAT: "raw"
   DESKTOP: "xfce"
-  SIZE: "15"  # 磁盘大小(GB)
+  SIZE: "20"  # 磁盘大小(GB)
   TOOLSET: "minimal"
   USER_PASS: "kali:kali"
   TIMEZONE: "Asia/Shanghai"
-  OUTPUT_DIR: "artifacts"
-  DEPLOY_DIR: "releases"
-  # QEMU模拟配置
-  QEMU_CPU: "max"
-  QEMU_MEM: "4G"
-  # 构建脚本仓库及配方文件配置
-  BUILD_SCRIPT_REPO: "https://gitlab.com/kalilinux/build-scripts/kali-vm.git"
+  # 路径配置
+  OUTPUT_DIR: "${{ github.workspace }}/artifacts"
+  DEPLOY_DIR: "${{ github.workspace }}/releases"
   BUILD_SCRIPT_DIR: "kali-vm"
-  RECIPE_FILE: "image.yaml"  # 显式指定配方文件（根据目录内容选择存在的.yaml文件）
+  # 官方构建容器镜像
+  BUILD_IMAGE: "kalilinux/kali-vm-build:latest"
 
 jobs:
   build:
-    name: 纯主机环境构建 Kali VM 镜像
+    name: 容器化构建 Kali VM 镜像
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     timeout-minutes: 180
 
     steps:
-      - name: 拉取主代码仓库
+      - name: 拉取代码仓库
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
-      - name: 获取Kali VM构建脚本及配方文件
+      - name: 准备构建目录
         run: |
-          if [ ! -d "${BUILD_SCRIPT_DIR}" ]; then
-            echo "克隆构建脚本仓库..."
-            git clone $BUILD_SCRIPT_REPO $BUILD_SCRIPT_DIR
+          # 创建输出目录并设置权限（容器内需要读写权限）
+          mkdir -p $OUTPUT_DIR $DEPLOY_DIR
+          chmod -R 777 $OUTPUT_DIR $DEPLOY_DIR
+          
+          # 克隆官方构建脚本（包含配方文件）
+          if [ ! -d "$BUILD_SCRIPT_DIR" ]; then
+            git clone https://gitlab.com/kalilinux/build-scripts/kali-vm.git $BUILD_SCRIPT_DIR
           fi
           
-          # 验证关键文件
-          if [ ! -f "${BUILD_SCRIPT_DIR}/build.sh" ]; then
-            echo "❌ 未找到${BUILD_SCRIPT_DIR}/build.sh"
+          # 确认构建脚本和配方文件存在
+          if [ ! -f "$BUILD_SCRIPT_DIR/build.sh" ]; then
+            echo "❌ 未找到构建脚本"
             exit 1
           fi
           
-          # 验证配方文件存在
-          if [ ! -f "${BUILD_SCRIPT_DIR}/${RECIPE_FILE}" ]; then
-            echo "❌ 未找到配方文件${BUILD_SCRIPT_DIR}/${RECIPE_FILE}"
-            echo "当前目录下的配方文件："
-            find $BUILD_SCRIPT_DIR -name "*.yaml"
+          if [ -z "$(find $BUILD_SCRIPT_DIR -name '*.yaml')" ]; then
+            echo "❌ 未找到配方文件"
             exit 1
           fi
           
-          echo "BUILD_SCRIPT_PATH=${BUILD_SCRIPT_DIR}/build.sh" >> $GITHUB_ENV
-          echo "确认构建脚本路径：${{ env.BUILD_SCRIPT_PATH }}"
-          echo "确认配方文件路径：${BUILD_SCRIPT_DIR}/${RECIPE_FILE}"
+          # 显示目录结构用于调试
+          ls -la $BUILD_SCRIPT_DIR
 
-      - name: 安装主机环境依赖
+      - name: 启动Docker服务并验证
         run: |
-          sudo apt-get update -y
-          sudo apt-get upgrade -y
-          sudo apt-get remove -y containerd.io containerd docker.io docker-engine docker-ce
-          sudo apt-get autoremove -y
-          
-          sudo apt-get install -y \
-            debos \
-            dosfstools \
-            p7zip-full \
-            qemu-system-x86 \
-            qemu-utils \
-            zerofree \
-            git \
-            curl \
-            wget \
-            unzip \
-            parted \
-            kpartx \
-            debootstrap \
-            squashfs-tools \
-            xz-utils \
-            libguestfs-tools
-          
-          qemu-system-x86_64 --version
-          sudo chmod 666 /dev/null /dev/zero /dev/random /dev/urandom
+          sudo systemctl start docker
+          docker --version
+          # 测试容器运行
+          docker run --rm hello-world
 
-      - name: 配置Debos强制软件模拟
+      - name: 拉取官方构建容器镜像
         run: |
-          mkdir -p ~/.config/debos
-          cat > ~/.config/debos/config.yaml << EOF
-          qemu:
-            acceleration: none
-            cpu: $QEMU_CPU
-            memory: $QEMU_MEM
-            extra-args: "-no-kvm -machine q35,accel=tcg -smp 2"
-          EOF
-          cat ~/.config/debos/config.yaml
+          docker pull $BUILD_IMAGE
+          # 验证镜像
+          docker images | grep kali-vm-build
 
-      - name: 主机环境直接构建镜像（显式指定配方文件）
+      - name: 使用容器构建Kali VM镜像
         run: |
-          cd $BUILD_SCRIPT_DIR
-          echo "当前工作目录: $(pwd)"
-          echo "配方文件详情："
-          ls -la $RECIPE_FILE
-          
-          chmod +x build.sh
-          ulimit -n 4096
-          
-          # 关键修复：通过 -R 参数显式指定配方文件（根据build.sh的逻辑调整参数）
-          # 若-R不生效，尝试直接将配方文件作为参数传递（部分版本支持）
-          ./build.sh \
-            -a $ARCH \
-            -b $BRANCH \
-            -v $VARIANT \
-            -f $FORMAT \
-            -D $DESKTOP \
-            -s $SIZE \
-            -T $TOOLSET \
-            -U $USER_PASS \
-            -Z $TIMEZONE \
-            -R $RECIPE_FILE \  # 显式指定配方文件路径
-            -- \
-            --artifactdir ../$OUTPUT_DIR \
-            --memory $QEMU_MEM
+          # 通过容器运行构建脚本，映射必要目录
+          docker run --rm \
+            -v "${{ github.workspace }}/$BUILD_SCRIPT_DIR:/workdir" \
+            -v "$OUTPUT_DIR:/artifacts" \
+            -e ARCH=$ARCH \
+            -e BRANCH=$BRANCH \
+            -e VARIANT=$VARIANT \
+            -e FORMAT=$FORMAT \
+            -e DESKTOP=$DESKTOP \
+            -e SIZE=$SIZE \
+            -e TOOLSET=$TOOLSET \
+            -e USER_PASS=$USER_PASS \
+            -e TIMEZONE=$TIMEZONE \
+            $BUILD_IMAGE \
+            /bin/bash -c "cd /workdir && \
+                         chmod +x build.sh && \
+                         ./build.sh \
+                           -a \$ARCH \
+                           -b \$BRANCH \
+                           -v \$VARIANT \
+                           -f \$FORMAT \
+                           -D \$DESKTOP \
+                           -s \$SIZE \
+                           -T \$TOOLSET \
+                           -U \$USER_PASS \
+                           -Z \$TIMEZONE \
+                           -- \
+                           --artifactdir /artifacts \
+                           --memory 4G"
 
-          # 验证构建结果
-          cd ..
+      - name: 验证构建产物
+        run: |
+          echo "构建产物目录内容："
+          ls -lh $OUTPUT_DIR
+          
           if [ -z "$(ls $OUTPUT_DIR/*.$FORMAT 2>/dev/null)" ]; then
             echo "❌ 镜像构建失败，未找到产物文件"
             exit 1
           else
-            echo "✅ 镜像构建成功，产物列表："
-            ls -lh $OUTPUT_DIR
+            echo "✅ 镜像构建成功"
           fi
 
       - name: 压缩镜像产物
         run: |
-          mkdir -p $DEPLOY_DIR
           for file in $OUTPUT_DIR/*.$FORMAT; do
             filename=$(basename "$file")
             7z a -t7z -mmt=4 "$DEPLOY_DIR/${filename}.7z" "$file" -mx=9
@@ -164,10 +141,10 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          name: "Kali VM 纯主机构建 ${{ github.sha }}"
-          tag_name: "native-build-${{ github.sha }}"
+          name: "Kali VM 容器化构建 ${{ github.sha }}"
+          tag_name: "container-build-${{ github.sha }}"
           body: |
-            纯主机环境自动构建产物（基于 commit: ${{ github.sha }}）
+            容器化自动构建产物（基于 commit: ${{ github.sha }}）
             - 架构：${{ env.ARCH }}
             - 桌面环境：${{ env.DESKTOP }}
             - 格式：${{ env.FORMAT }}
